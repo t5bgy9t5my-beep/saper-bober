@@ -1,210 +1,26 @@
-import React, { useMemo, useState } from "react";
-import { createRoot } from "react-dom/client";
-import "./styles.css";
-
-const SIZE = 5;
-const MINES = 5;
-const START_BALANCE = 1000;
-const BETS = [10, 25, 50, 100, 250, 500, 1000];
-const MULTIPLIERS = [1, 1.2, 1.45, 1.7, 2.1, 2.7, 3.5, 4.5, 6];
-
-function createBoard() {
-  const board = Array(SIZE * SIZE).fill(false);
-  let placed = 0;
-  while (placed < MINES) {
-    const index = Math.floor(Math.random() * board.length);
-    if (!board[index]) {
-      board[index] = true;
-      placed++;
-    }
-  }
-  return board;
-}
-
-function App() {
-  const [balance, setBalance] = useState(START_BALANCE);
-  const [bet, setBet] = useState(10);
-  const [board, setBoard] = useState(() => createBoard());
-  const [opened, setOpened] = useState([]);
-  const [status, setStatus] = useState("ready");
-  const [screen, setScreen] = useState("game");
-
-  const safeCount = opened.filter((i) => !board[i]).length;
-  const multiplier = useMemo(
-    () => MULTIPLIERS[Math.min(safeCount, MULTIPLIERS.length - 1)],
-    [safeCount]
-  );
-  const potentialWin = Math.floor(bet * multiplier);
-
-  function startGame() {
-    if (balance < bet) return;
-    setBalance((v) => v - bet);
-    setBoard(createBoard());
-    setOpened([]);
-    setStatus("playing");
-  }
-
-  function openCell(index) {
-    if (status !== "playing" || opened.includes(index)) return;
-
-    setOpened((prev) => [...prev, index]);
-
-    if (board[index]) {
-      setStatus("lost");
-      return;
-    }
-
-    if (safeCount + 1 >= SIZE * SIZE - MINES) {
-      setStatus("won");
-    }
-  }
-
-  function cashOut() {
-    if (status !== "playing" || safeCount === 0) return;
-    setBalance((v) => v + potentialWin);
-    setStatus("cashed");
-  }
-
-  function selectBet(value) {
-    if (status === "playing") return;
-    setBet(value);
-  }
-
-  return (
-    <div className="app">
-      <header className="top">
-        <div className="logo">
-          <div className="bober">🦫</div>
-          <div>
-            <div className="eyebrow">МИНИ-ИГРА</div>
-            <h1>Сапёр Бобёр</h1>
-            <p>Не попади на мину</p>
-          </div>
-        </div>
-
-        <div className="balance">
-          <span>Баланс</span>
-          <b>🪙 {balance.toLocaleString("ru-RU")}</b>
-        </div>
-      </header>
-
-      {screen === "game" && (
-        <main>
-          <section className="card">
-            <div className="card-title">
-              <div>
-                <span className="muted">СТАВКА</span>
-                <strong>🪙 {bet}</strong>
-              </div>
-              <div className="bet-select">
-                {BETS.map((value) => (
-                  <button
-                    key={value}
-                    className={value === bet ? "selected" : ""}
-                    onClick={() => selectBet(value)}
-                  >
-                    {value}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className={`status ${status}`}>
-              {status === "ready" && <>🦫 <b>Готов?</b><span>Нажми «Начать игру»</span></>}
-              {status === "playing" && <>🦫 <b>Осторожно!</b><span>Открывай клетки</span></>}
-              {status === "lost" && <>💣 <b>БАБАХ!</b><span>Ты попал на мину</span></>}
-              {status === "won" && <>🏆 <b>ПОЛЕ ОЧИЩЕНО!</b><span>Все безопасные клетки открыты</span></>}
-              {status === "cashed" && <>💰 <b>ВЫИГРЫШ!</b><span>Монеты зачислены на баланс</span></>}
-            </div>
-
-            <div className="board">
-              {board.map((mine, index) => {
-                const isOpen = opened.includes(index);
-                return (
-                  <button
-                    key={index}
-                    className={`cell ${isOpen ? "open" : ""} ${isOpen && mine ? "mine" : ""}`}
-                    onClick={() => openCell(index)}
-                    disabled={isOpen || status !== "playing"}
-                    aria-label={`Клетка ${index + 1}`}
-                  >
-                    {isOpen ? (mine ? "💣" : "🪙") : ""}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="stats">
-              <div>
-                <span>Безопасно</span>
-                <b>{safeCount}</b>
-              </div>
-              <div>
-                <span>Множитель</span>
-                <b>×{multiplier.toFixed(2)}</b>
-              </div>
-              <div>
-                <span>Выигрыш</span>
-                <b>🪙 {potentialWin}</b>
-              </div>
-            </div>
-
-            <button
-              className="primary gold"
-              disabled={status !== "playing" || safeCount === 0}
-              onClick={cashOut}
-            >
-              💰 ЗАБРАТЬ {potentialWin} 🪙
-            </button>
-
-            <button
-              className="primary"
-              disabled={status === "playing" || balance < bet}
-              onClick={startGame}
-            >
-              🎮 {status === "ready" ? "НАЧАТЬ ИГРУ" : "ИГРАТЬ ЕЩЁ"}
-            </button>
-
-            <div className="rules">
-              <span>💣 Мин: {MINES}</span>
-              <span>⬜ Поле: 5×5</span>
-              <span>🪙 Виртуальные монеты</span>
-            </div>
-          </section>
-        </main>
-      )}
-
-      {screen !== "game" && (
-        <section className="placeholder card">
-          <div className="placeholder-icon">
-            {screen === "bonus" ? "🎁" : screen === "rating" ? "🏆" : "👤"}
-          </div>
-          <h2>
-            {screen === "bonus" ? "Бонус" : screen === "rating" ? "Рейтинг" : "Профиль"}
-          </h2>
-          <p>Этот раздел добавим в следующей версии.</p>
-        </section>
-      )}
-
-      <nav className="nav">
-        {[
-          ["game", "🎮", "Игра"],
-          ["bonus", "🎁", "Бонус"],
-          ["rating", "🏆", "Рейтинг"],
-          ["profile", "👤", "Профиль"],
-        ].map(([id, icon, label]) => (
-          <button
-            key={id}
-            className={screen === id ? "active" : ""}
-            onClick={() => setScreen(id)}
-          >
-            <span>{icon}</span>
-            <small>{label}</small>
-          </button>
-        ))}
-      </nav>
-    </div>
-  );
-}
-
-createRoot(document.getElementById("root")).render(<App />);
+import React,{useEffect,useState}from"react";
+import{createRoot}from"react-dom/client";import"./styles.css";
+const B=[10,25,50,100,250,500,1000],M=[1,1.2,1.45,1.7,2.1,2.7,3.5,4.5,6];
+const board=()=>{let a=Array(25).fill(0),n=0;while(n<5){let i=Math.random()*25|0;if(!a[i])a[i]=1,n++}return a};
+const tg=()=>window.Telegram?.WebApp;
+function App(){
+const[u,setU]=useState(null),[bal,setBal]=useState(()=>+localStorage.sb_bal||1000),[bonus,setBonus]=useState(()=>localStorage.sb_bonus||""),[bet,setBet]=useState(10),[b,setB]=useState(board),[o,setO]=useState([]),[s,setS]=useState("ready"),[page,setPage]=useState("game"),[msg,setMsg]=useState("");
+useEffect(()=>{let t=tg();if(t){t.ready();t.expand();t.setHeaderColor?.("#10170e");t.setBackgroundColor?.("#0d120a")}setU(t?.initDataUnsafe?.user||null)},[]);
+useEffect(()=>localStorage.sb_bal=bal,[bal]);
+let safe=o.filter(i=>!b[i]).length,m=M[Math.min(safe,8)],win=Math.floor(bet*m),today=new Date().toISOString().slice(0,10),avail=bonus!==today;
+function start(){if(bal<bet)return setMsg("Недостаточно монет");setBal(x=>x-bet);setB(board());setO([]);setS("playing");setMsg("")}
+function open(i){if(s!="playing"||o.includes(i))return;let n=[...o,i];setO(n);if(b[i]){setS("lost");setMsg("Мина! Ставка потеряна.")}else if(n.filter(x=>!b[x]).length>=20){setS("won");setBal(x=>x+win);setMsg("Поле очищено! +"+win+" 🪙")}}
+function cash(){if(s!="playing"||!safe)return;setBal(x=>x+win);setS("cashed");setMsg("Ты забрал "+win+" 🪙")}
+function getBonus(){if(!avail)return;setBal(x=>x+100);setBonus(today);localStorage.sb_bonus=today;setMsg("🎁 +100 🪙 зачислено!")}
+let name=u?.first_name||"Игрок",photo=u?.photo_url;
+return <div className="app"><header><div className="brand"><div className="bob">🦫</div><div><small>TELEGRAM MINI APP</small><h1>Сапёр Бобёр</h1><p>Не попади на мину</p></div></div><button className="mini" onClick={()=>setPage("profile")}>{photo?<img src={photo}/>:<>👤</>} 🪙 {bal.toLocaleString()}</button></header>
+{page==="game"&&<main className="card"><div className="user">👋 {name}<span>Telegram</span></div><div className="row"><div><small>СТАВКА</small><strong>🪙 {bet}</strong></div><div className="bets">{B.map(x=><button className={x==bet?"sel":""} onClick={()=>s!="playing"&&setBet(x)}>{x}</button>)}</div></div>
+<div className={"status "+s}>{s==="ready"?"🦫 Готов?":s==="playing"?"🦫 Осторожно!":s==="lost"?"💣 БАБАХ!":s==="won"?"🏆 ПОБЕДА!":"💰 ВЫИГРЫШ!"}<span>{s==="ready"?"Нажми «Начать игру»":msg}</span></div>
+<div className="grid">{b.map((mine,i)=><button className={"cell "+(o.includes(i)?"open ":"")+(o.includes(i)&&mine?"mine":"")} disabled={s!="playing"||o.includes(i)} onClick={()=>open(i)}>{o.includes(i)?mine?"💣":"🪙":""}</button>)}</div>
+<div className="stats"><div>Безопасно<b>{safe}</b></div><div>Множитель<b>×{m.toFixed(2)}</b></div><div>Выигрыш<b>🪙 {win}</b></div></div>
+<button className="gold" disabled={s!="playing"||!safe} onClick={cash}>💰 ЗАБРАТЬ {win} 🪙</button><button disabled={s==="playing"||bal<bet} onClick={start}>🎮 {s==="ready"?"НАЧАТЬ ИГРУ":"ИГРАТЬ ЕЩЁ"}</button></main>}
+{page==="bonus"&&<section className="card page"><div className="icon">🎁</div><h2>Ежедневный бонус</h2><p>+100 виртуальных монет один раз в день.</p><div className="bonus">+100 🪙<small>{avail?"Доступен сегодня":"Уже получен сегодня"}</small></div><button className="gold" disabled={!avail} onClick={getBonus}>{avail?"ЗАБРАТЬ БОНУС":"БОНУС ПОЛУЧЕН"}</button>{msg&&<p>{msg}</p>}</section>}
+{page==="rating"&&<section className="card page"><div className="icon">🏆</div><h2>Рейтинг</h2><p>Пока локальный прототип. Онлайн-рейтинг подключим с сервером.</p><div className="rank">🥇 {name}<b>🪙 {bal}</b></div></section>}
+{page==="profile"&&<section className="card page">{photo?<img className="avatar" src={photo}/>:<div className="avatar">👤</div>}<h2>{name}</h2><p>Профиль Telegram</p><div className="profile"><div>Telegram ID<b>{u?.id||"локальный режим"}</b></div><div>Баланс<b>🪙 {bal}</b></div></div><button onClick={()=>setPage("game")}>🎮 В ИГРУ</button></section>}
+<nav>{[["game","🎮","Игра"],["bonus","🎁","Бонус"],["rating","🏆","Рейтинг"],["profile","👤","Профиль"]].map(x=><button className={page==x[0]?"active":""} onClick={()=>{setPage(x[0]);setMsg("")}}><span>{x[1]}</span><small>{x[2]}</small></button>)}</nav></div>}
+createRoot(document.getElementById("root")).render(<App/>);
