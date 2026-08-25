@@ -1,24 +1,9 @@
-```javascript
 const games = new Map();
-const balances = new Map();
 
 const BOARD_SIZE = 25;
 const MINES = 5;
-const START_BALANCE = 1000;
 
-function getBalance(userId) {
-  if (!balances.has(userId)) {
-    balances.set(userId, START_BALANCE);
-  }
-
-  return balances.get(userId);
-}
-
-function setBalance(userId, value) {
-  balances.set(userId, Number(value.toFixed(2)));
-}
-
-function createGame(bet, userId) {
+function createGame(bet) {
   const mines = new Set();
 
   while (mines.size < MINES) {
@@ -26,17 +11,17 @@ function createGame(bet, userId) {
   }
 
   return {
-    userId,
     bet: Number(bet),
     mines: [...mines],
     opened: [],
     multiplier: 1,
     win: 0,
     status: "playing",
+    createdAt: Date.now(),
   };
 }
 
-function createGameId() {
+function makeGameId() {
   return (
     Date.now().toString(36) +
     Math.random().toString(36).slice(2)
@@ -56,8 +41,7 @@ export default function handler(req, res) {
       action,
       gameId,
       cell,
-      bet,
-      userId = "demo-user",
+      bet = 10,
     } = req.body || {};
 
     // =========================
@@ -65,11 +49,11 @@ export default function handler(req, res) {
     // =========================
 
     if (action === "start") {
-      const gameBet = Number(bet);
+      const numericBet = Number(bet);
 
       if (
-        !Number.isFinite(gameBet) ||
-        gameBet <= 0
+        !Number.isFinite(numericBet) ||
+        numericBet <= 0
       ) {
         return res.status(400).json({
           ok: false,
@@ -77,33 +61,9 @@ export default function handler(req, res) {
         });
       }
 
-      if (gameBet > 100000) {
-        return res.status(400).json({
-          ok: false,
-          error: "Bet is too large",
-        });
-      }
+      const id = makeGameId();
 
-      const balance = getBalance(String(userId));
-
-      if (balance < gameBet) {
-        return res.status(400).json({
-          ok: false,
-          error: "Insufficient balance",
-          balance,
-        });
-      }
-
-      // Списываем ставку СЕРВЕРНО.
-      const newBalance = balance - gameBet;
-      setBalance(String(userId), newBalance);
-
-      const id = createGameId();
-
-      const game = createGame(
-        gameBet,
-        String(userId)
-      );
+      const game = createGame(numericBet);
 
       games.set(id, game);
 
@@ -113,10 +73,38 @@ export default function handler(req, res) {
         boardSize: BOARD_SIZE,
         mines: MINES,
         bet: game.bet,
-        multiplier: 1,
+        multiplier: game.multiplier,
         win: 0,
-        balance: newBalance,
+        opened: [],
         status: "playing",
+      });
+    }
+
+    // =========================
+    // STATE
+    // =========================
+
+    if (action === "state") {
+      if (!gameId || !games.has(gameId)) {
+        return res.status(200).json({
+          ok: true,
+          exists: false,
+        });
+      }
+
+      const game = games.get(gameId);
+
+      return res.status(200).json({
+        ok: true,
+        exists: true,
+        gameId,
+        boardSize: BOARD_SIZE,
+        mines: MINES,
+        bet: game.bet,
+        multiplier: game.multiplier,
+        win: game.win,
+        opened: game.opened,
+        status: game.status,
       });
     }
 
@@ -133,13 +121,6 @@ export default function handler(req, res) {
       }
 
       const game = games.get(gameId);
-
-      if (String(game.userId) !== String(userId)) {
-        return res.status(403).json({
-          ok: false,
-          error: "Game belongs to another user",
-        });
-      }
 
       if (game.status !== "playing") {
         return res.status(400).json({
@@ -170,12 +151,10 @@ export default function handler(req, res) {
 
       game.opened.push(cellNumber);
 
-      // =========================
-      // MINE
-      // =========================
-
+      // МИНА
       if (game.mines.includes(cellNumber)) {
         game.status = "lost";
+        game.multiplier = 0;
         game.win = 0;
 
         return res.status(200).json({
@@ -184,17 +163,12 @@ export default function handler(req, res) {
           cell: cellNumber,
           multiplier: 0,
           win: 0,
-          bet: game.bet,
           opened: game.opened,
-          balance: getBalance(String(userId)),
           status: "lost",
         });
       }
 
-      // =========================
-      // SAFE
-      // =========================
-
+      // БЕЗОПАСНАЯ КЛЕТКА
       game.multiplier = Number(
         (game.multiplier * 1.25).toFixed(2)
       );
@@ -209,9 +183,7 @@ export default function handler(req, res) {
         cell: cellNumber,
         multiplier: game.multiplier,
         win: game.win,
-        bet: game.bet,
         opened: game.opened,
-        balance: getBalance(String(userId)),
         status: "playing",
       });
     }
@@ -230,13 +202,6 @@ export default function handler(req, res) {
 
       const game = games.get(gameId);
 
-      if (String(game.userId) !== String(userId)) {
-        return res.status(403).json({
-          ok: false,
-          error: "Game belongs to another user",
-        });
-      }
-
       if (game.status !== "playing") {
         return res.status(400).json({
           ok: false,
@@ -251,52 +216,26 @@ export default function handler(req, res) {
         });
       }
 
-      // ВАЖНО:
-      // сумма берётся только из серверного состояния игры.
-      const win = game.win;
-
-      const balance = getBalance(String(userId));
-
-      const newBalance = balance + win;
-
-      setBalance(String(userId), newBalance);
-
       game.status = "cashed_out";
+
+      const win = game.win;
 
       return res.status(200).json({
         ok: true,
         result: "cashout",
-        bet: game.bet,
         multiplier: game.multiplier,
         win,
-        balance: newBalance,
+        opened: game.opened,
         status: "cashed_out",
       });
     }
-
-    // =========================
-    // BALANCE
-    // =========================
-
-    if (action === "balance") {
-      const balance = getBalance(String(userId));
-
-      return res.status(200).json({
-        ok: true,
-        balance,
-      });
-    }
-
-    // =========================
-    // UNKNOWN ACTION
-    // =========================
 
     return res.status(400).json({
       ok: false,
       error: "Unknown action",
     });
   } catch (error) {
-    console.error("GAME ERROR:", error);
+    console.error(error);
 
     return res.status(500).json({
       ok: false,
@@ -304,4 +243,3 @@ export default function handler(req, res) {
     });
   }
 }
-```
