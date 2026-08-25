@@ -2,21 +2,30 @@ import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
-const tg = window.Telegram?.WebApp;
+const BALANCE_KEY = "saper_bober_balance";
+const HISTORY_KEY = "saper_bober_history";
+const BONUS_KEY = "saper_bober_bonus_date";
 
 const BETS = [10, 25, 50, 100, 250, 500, 1000];
-const CELLS = 25;
-const MINES = 5;
+
+const Telegram =
+  window.Telegram && window.Telegram.WebApp
+    ? window.Telegram.WebApp
+    : null;
+
+if (Telegram) {
+  Telegram.ready();
+  Telegram.expand();
+}
 
 function getTelegramUser() {
-  const user = tg?.initDataUnsafe?.user;
+  const user = Telegram?.initDataUnsafe?.user;
 
   if (user) {
     return {
       id: user.id,
       name:
         [user.first_name, user.last_name].filter(Boolean).join(" ") ||
-        user.username ||
         "Игрок",
       username: user.username ? `@${user.username}` : "",
       photo: user.photo_url || "",
@@ -26,460 +35,371 @@ function getTelegramUser() {
   return {
     id: "demo",
     name: "Игрок",
-    username: "@demo",
+    username: "",
     photo: "",
   };
 }
 
-function createBoard() {
+function loadNumber(key, fallback) {
+  const value = Number(localStorage.getItem(key));
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function loadHistory() {
+  try {
+    const data = JSON.parse(localStorage.getItem(HISTORY_KEY));
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(history) {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 30)));
+}
+
+function todayKey() {
+  const now = new Date();
+
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(
+    2,
+    "0"
+  )}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+function generateMines(count = 5) {
   const mines = new Set();
 
-  while (mines.size < MINES) {
-    mines.add(Math.floor(Math.random() * CELLS));
+  while (mines.size < count) {
+    mines.add(Math.floor(Math.random() * 25));
   }
 
-  return Array.from({ length: CELLS }, (_, i) => mines.has(i));
+  return mines;
 }
 
 function App() {
-  const user = useMemo(getTelegramUser, []);
+  const [user] = useState(getTelegramUser);
+
+  const [balance, setBalance] = useState(() =>
+    loadNumber(BALANCE_KEY, 1000)
+  );
+
+  const [history, setHistory] = useState(loadHistory);
 
   const [page, setPage] = useState("game");
 
-  const [balance, setBalance] = useState(() => {
-    const saved = localStorage.getItem("saper_balance");
-    return saved ? Number(saved) : 1000;
+  const [bet, setBet] = useState(100);
+
+  const [gameState, setGameState] = useState("idle");
+  const [mines, setMines] = useState(new Set());
+  const [opened, setOpened] = useState(new Set());
+
+  const [currentWin, setCurrentWin] = useState(0);
+  const [currentMultiplier, setCurrentMultiplier] = useState(1);
+
+  const [gameId, setGameId] = useState(1);
+
+  const [bonusAvailable, setBonusAvailable] = useState(() => {
+    return localStorage.getItem(BONUS_KEY) !== todayKey();
   });
-
-  const [bet, setBet] = useState(10);
-
-  const [board, setBoard] = useState([]);
-
-  const [opened, setOpened] = useState([]);
-
-  const [gameStarted, setGameStarted] = useState(false);
-
-  const [gameOver, setGameOver] = useState(false);
-
-  const [gameResult, setGameResult] = useState(null);
-
-  const [status, setStatus] = useState(
-    "Выбери ставку и начни игру"
-  );
-
-  const [multiplier, setMultiplier] = useState(1);
-
-  const [bonusTaken, setBonusTaken] = useState(() => {
-    const date = localStorage.getItem("saper_bonus_date");
-    return date === new Date().toDateString();
-  });
-
-  /*
-   * Потенциальный выигрыш.
-   *
-   * Пока игра идёт:
-   * ставка × текущий коэффициент.
-   *
-   * Например:
-   * 100 × 1.40 = 140 монет.
-   */
-  const potentialWin = Math.floor(bet * multiplier);
-
-  const potentialProfit = Math.max(0, potentialWin - bet);
 
   useEffect(() => {
-    localStorage.setItem("saper_balance", String(balance));
+    localStorage.setItem(BALANCE_KEY, String(balance));
   }, [balance]);
 
   useEffect(() => {
-    tg?.ready?.();
-    tg?.expand?.();
-  }, []);
+    saveHistory(history);
+  }, [history]);
+
+  const telegramName = user.name;
+  const avatar = user.photo;
+
+  const openedCount = opened.size;
+
+  const multiplier = useMemo(() => {
+    if (openedCount <= 0) return 1;
+
+    const values = {
+      1: 1.15,
+      2: 1.35,
+      3: 1.6,
+      4: 2.0,
+      5: 2.5,
+      6: 3.2,
+      7: 4.0,
+      8: 5.0,
+      9: 6.5,
+      10: 8.0,
+      11: 10.0,
+      12: 12.5,
+      13: 15.0,
+      14: 18.0,
+      15: 22.0,
+      16: 27.0,
+      17: 33.0,
+      18: 40.0,
+      19: 50.0,
+      20: 65.0,
+    };
+
+    return values[openedCount] || 1;
+  }, [openedCount]);
 
   function startGame() {
-    if (balance < bet) {
-      setStatus("Недостаточно монет");
+    if (gameState !== "idle") return;
+
+    if (bet > balance) {
+      alert("Недостаточно монет для этой ставки.");
       return;
     }
 
-    const newBoard = createBoard();
-
-    setBalance((b) => b - bet);
-
-    setBoard(newBoard);
-    setOpened([]);
-    setMultiplier(1);
-    setGameOver(false);
-    setGameStarted(true);
-    setGameResult(null);
-
-    setStatus("Открывай клетки и не попади на мину 💣");
+    setBalance((value) => value - bet);
+    setMines(generateMines(5));
+    setOpened(new Set());
+    setCurrentWin(0);
+    setCurrentMultiplier(1);
+    setGameState("playing");
   }
 
   function openCell(index) {
-    if (!gameStarted || gameOver || opened.includes(index)) {
-      return;
-    }
+    if (gameState !== "playing") return;
+    if (opened.has(index)) return;
 
-    /*
-     * МИНА
-     */
-    if (board[index]) {
-      setOpened((o) => [...o, index]);
+    if (mines.has(index)) {
+      const lostGame = {
+        id: gameId,
+        date: new Date().toLocaleString("ru-RU"),
+        bet,
+        opened: opened.size,
+        multiplier: Number(multiplier.toFixed(2)),
+        win: 0,
+        result: "Проигрыш",
+      };
 
-      setGameOver(true);
-      setGameStarted(false);
+      setHistory((items) => [lostGame, ...items]);
+      setGameId((id) => id + 1);
 
-      setGameResult({
-        type: "lose",
-        amount: bet,
+      setOpened((old) => {
+        const next = new Set(old);
+        next.add(index);
+        return next;
       });
 
-      setStatus("💥 МИНА!");
+      setCurrentWin(0);
+      setGameState("lost");
       return;
     }
 
-    /*
-     * БЕЗОПАСНАЯ КЛЕТКА
-     */
-    const newOpened = [...opened, index];
+    const nextOpened = new Set(opened);
+    nextOpened.add(index);
 
-    /*
-     * Коэффициент растёт
-     */
-    const newMultiplier = Number(
-      (1 + newOpened.length * 0.2).toFixed(2)
-    );
+    setOpened(nextOpened);
 
-    const newPotentialWin = Math.floor(
-      bet * newMultiplier
-    );
+    const nextCount = nextOpened.size;
 
-    setOpened(newOpened);
-    setMultiplier(newMultiplier);
+    const values = {
+      1: 1.15,
+      2: 1.35,
+      3: 1.6,
+      4: 2.0,
+      5: 2.5,
+      6: 3.2,
+      7: 4.0,
+      8: 5.0,
+      9: 6.5,
+      10: 8.0,
+      11: 10.0,
+      12: 12.5,
+      13: 15.0,
+      14: 18.0,
+      15: 22.0,
+      16: 27.0,
+      17: 33.0,
+      18: 40.0,
+      19: 50.0,
+      20: 65.0,
+    };
 
-    /*
-     * Все безопасные клетки открыты
-     */
-    const safeCells = CELLS - MINES;
+    const nextMultiplier = values[nextCount] || 1;
 
-    if (newOpened.length >= safeCells) {
-      setBalance((b) => b + newPotentialWin);
+    const nextWin = Math.floor(bet * nextMultiplier);
 
-      setGameOver(true);
-      setGameStarted(false);
-
-      setGameResult({
-        type: "win",
-        amount: newPotentialWin,
-      });
-
-      setStatus("🎉 ПОЛЕ ОЧИЩЕНО!");
-      return;
-    }
-
-    /*
-     * Обычная безопасная клетка
-     */
-    setStatus(
-      `🟢 Безопасно! Теперь можно забрать ${newPotentialWin} 🪙`
-    );
+    setCurrentMultiplier(nextMultiplier);
+    setCurrentWin(nextWin);
   }
 
-  function cashOut() {
-    if (!gameStarted || opened.length === 0) {
-      return;
-    }
+  function takeWin() {
+    if (gameState !== "playing") return;
+    if (currentWin <= 0) return;
 
-    const win = Math.floor(bet * multiplier);
+    const win = currentWin;
 
-    setBalance((b) => b + win);
+    setBalance((value) => value + win);
 
-    setGameOver(true);
-    setGameStarted(false);
+    const completedGame = {
+      id: gameId,
+      date: new Date().toLocaleString("ru-RU"),
+      bet,
+      opened: opened.size,
+      multiplier: Number(currentMultiplier.toFixed(2)),
+      win,
+      result: "Забрано",
+    };
 
-    setGameResult({
-      type: "cashout",
-      amount: win,
-    });
+    setHistory((items) => [completedGame, ...items]);
+    setGameId((id) => id + 1);
 
-    setStatus(`💰 Вы забрали ${win} 🪙`);
+    setGameState("won");
+  }
+
+  function newGame() {
+    setGameState("idle");
+    setMines(new Set());
+    setOpened(new Set());
+    setCurrentWin(0);
+    setCurrentMultiplier(1);
   }
 
   function takeBonus() {
-    if (bonusTaken) {
-      return;
-    }
+    if (!bonusAvailable) return;
 
-    setBalance((b) => b + 100);
+    const today = todayKey();
 
-    setBonusTaken(true);
+    localStorage.setItem(BONUS_KEY, today);
 
-    localStorage.setItem(
-      "saper_bonus_date",
-      new Date().toDateString()
-    );
+    setBalance((value) => value + 100);
+    setBonusAvailable(false);
   }
 
-  function resetBoardForNewGame() {
-    setBoard([]);
-    setOpened([]);
-    setMultiplier(1);
-    setGameOver(false);
-    setGameStarted(false);
-    setGameResult(null);
-    setStatus("Выбери ставку и начни игру");
+  function renderCell(index) {
+    const isOpen = opened.has(index);
+    const isMine = mines.has(index);
+
+    let content = "";
+
+    if (isOpen && isMine) {
+      content = "💣";
+    } else if (isOpen) {
+      content = "💎";
+    }
+
+    return (
+      <button
+        key={index}
+        className={`cell ${isOpen ? "open" : ""} ${
+          isOpen && isMine ? "mine" : ""
+        }`}
+        onClick={() => openCell(index)}
+        disabled={gameState !== "playing" || isOpen}
+      >
+        {content}
+      </button>
+    );
   }
 
   function GamePage() {
     return (
       <main>
-        <div className="user">
-          <span>
-            {user.name} {user.username}
-          </span>
+        <section className="card">
+          <div className="user">
+            <div>
+              Игрок: <strong>{telegramName}</strong>
+            </div>
 
-          <strong>{balance} 🪙</strong>
-        </div>
+            <span>🦫 #{user.id}</span>
+          </div>
 
-        <div className="card">
-
-          {/* Ставка */}
           <div className="row">
             <div>
-              <small>СТАВКА</small>
-              <strong>{bet} 🪙</strong>
+              <span>Баланс</span>
+              <strong>🪙 {balance}</strong>
             </div>
 
-            <div className="bets">
-              {BETS.map((value) => (
-                <button
-                  key={value}
-                  className={bet === value ? "sel" : ""}
-                  disabled={gameStarted}
-                  onClick={() => setBet(value)}
-                >
-                  {value}
-                </button>
-              ))}
+            <div>
+              <span>Ставка</span>
+
+              <div className="bets">
+                {BETS.map((value) => (
+                  <button
+                    key={value}
+                    className={bet === value ? "sel" : ""}
+                    disabled={gameState !== "idle"}
+                    onClick={() => setBet(value)}
+                  >
+                    {value}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
+        </section>
 
-          {/* Главный статус */}
-          <div className="status">
-            {status}
-
-            <span>
-              Мины: {MINES} · Множитель: ×
-              {multiplier.toFixed(2)}
-            </span>
-          </div>
-
-          {/* ПОТЕНЦИАЛЬНЫЙ ВЫИГРЫШ */}
-          {gameStarted && opened.length > 0 && (
-            <div
-              style={{
-                marginBottom: "10px",
-                padding: "14px",
-                borderRadius: "15px",
-                background: "#10170d",
-                border: "1px solid #34432b",
-                textAlign: "center",
-              }}
-            >
-              <div
-                style={{
-                  fontSize: "9px",
-                  color: "#87947d",
-                  fontWeight: "800",
-                  marginBottom: "3px",
-                }}
-              >
-                ПОТЕНЦИАЛЬНЫЙ ВЫИГРЫШ
-              </div>
-
-              <div
-                style={{
-                  fontSize: "28px",
-                  fontWeight: "900",
-                  color: "#c9ed79",
-                  lineHeight: "1.1",
-                }}
-              >
-                {potentialWin} 🪙
-              </div>
-
-              <div
-                style={{
-                  fontSize: "11px",
-                  color: "#a7b19f",
-                  marginTop: "5px",
-                }}
-              >
-                ×{multiplier.toFixed(2)} · +{potentialProfit} 🪙
-                к ставке
-              </div>
-            </div>
+        <div className="status">
+          {gameState === "idle" && (
+            <>
+              Готов к игре
+              <span>Выбери ставку и начинай</span>
+            </>
           )}
 
-          {/* Результат */}
-          {gameResult && (
-            <div
-              style={{
-                marginBottom: "10px",
-                padding: "15px",
-                borderRadius: "15px",
-                textAlign: "center",
-                background:
-                  gameResult.type === "lose"
-                    ? "#351d18"
-                    : "#172511",
-                border:
-                  gameResult.type === "lose"
-                    ? "1px solid #63352a"
-                    : "1px solid #3c5a2e",
-              }}
-            >
-              {gameResult.type === "lose" ? (
-                <>
-                  <div style={{ fontSize: "30px" }}>
-                    💥
-                  </div>
-
-                  <strong
-                    style={{
-                      display: "block",
-                      fontSize: "18px",
-                    }}
-                  >
-                    МИНА!
-                  </strong>
-
-                  <span
-                    style={{
-                      display: "block",
-                      marginTop: "5px",
-                      color: "#d08d7c",
-                      fontSize: "11px",
-                    }}
-                  >
-                    −{gameResult.amount} 🪙
-                  </span>
-                </>
-              ) : (
-                <>
-                  <div style={{ fontSize: "30px" }}>
-                    🎉
-                  </div>
-
-                  <strong
-                    style={{
-                      display: "block",
-                      fontSize: "18px",
-                    }}
-                  >
-                    ВЫИГРЫШ
-                  </strong>
-
-                  <span
-                    style={{
-                      display: "block",
-                      marginTop: "5px",
-                      color: "#b9df76",
-                      fontSize: "13px",
-                      fontWeight: "800",
-                    }}
-                  >
-                    +{gameResult.amount} 🪙
-                  </span>
-                </>
-              )}
-            </div>
+          {gameState === "playing" && (
+            <>
+              🪙 Можно забрать: {currentWin}
+              <span>
+                Коэффициент ×{currentMultiplier.toFixed(2)} · открыто{" "}
+                {openedCount}
+              </span>
+            </>
           )}
 
-          {/* Игровое поле */}
-          <div className="grid">
-            {board.length > 0
-              ? board.map((isMine, index) => {
-                  const isOpen = opened.includes(index);
+          {gameState === "won" && (
+            <>
+              ✅ Выигрыш забран: {currentWin} 🪙
+              <span>Игра завершена</span>
+            </>
+          )}
 
-                  return (
-                    <button
-                      key={index}
-                      className={`cell ${
-                        isOpen ? "open" : ""
-                      } ${
-                        isOpen && isMine ? "mine" : ""
-                      }`}
-                      onClick={() => openCell(index)}
-                    >
-                      {isOpen
-                        ? isMine
-                          ? "💣"
-                          : "🪙"
-                        : "?"}
-                    </button>
-                  );
-                })
-              : Array.from({ length: CELLS }).map(
-                  (_, index) => (
-                    <button
-                      key={index}
-                      className="cell"
-                      disabled
-                    >
-                      ?
-                    </button>
-                  )
-                )}
+          {gameState === "lost" && (
+            <>
+              💣 Бум!
+              <span>Ты открыл мину. Ставка потеряна.</span>
+            </>
+          )}
+        </div>
+
+        <div className="grid">
+          {Array.from({ length: 25 }, (_, index) => renderCell(index))}
+        </div>
+
+        <div className="stats">
+          <div>
+            Ставка
+            <b>{bet} 🪙</b>
           </div>
 
-          {/* Статистика */}
-          <div className="stats">
-            <div>
-              Ставка
-              <b>{bet} 🪙</b>
-            </div>
+          <div>
+            Коэффициент
+            <b>×{currentMultiplier.toFixed(2)}</b>
+          </div>
 
-            <div>
-              Коэффициент
-              <b>×{multiplier.toFixed(2)}</b>
-            </div>
-
-            <div>
-              Забрать
-              <b>
-                {gameStarted && opened.length > 0
-                  ? `${potentialWin} 🪙`
-                  : "—"}
-              </b>
-            </div>
+          <div>
+            Выигрыш
+            <b>{currentWin} 🪙</b>
           </div>
         </div>
 
-        {/* Кнопки */}
-        {!gameStarted && !gameResult && (
-          <button onClick={startGame}>
-            🎮 Начать игру
+        {gameState === "idle" && (
+          <button onClick={startGame}>🦫 НАЧАТЬ ИГРУ</button>
+        )}
+
+        {gameState === "playing" && (
+          <button className="gold" onClick={takeWin} disabled={currentWin <= 0}>
+            💰 ЗАБРАТЬ {currentWin} 🪙
           </button>
         )}
 
-        {gameStarted && opened.length === 0 && (
-          <button onClick={() => startGame()}>
-            🎮 Начать игру
-          </button>
-        )}
-
-        {gameStarted && opened.length > 0 && (
-          <button className="gold" onClick={cashOut}>
-            💰 Забрать {potentialWin} 🪙
-          </button>
-        )}
-
-        {gameResult && (
-          <button onClick={resetBoardForNewGame}>
-            🔄 Играть снова
-          </button>
+        {(gameState === "won" || gameState === "lost") && (
+          <button onClick={newGame}>🔄 НОВАЯ ИГРА</button>
         )}
       </main>
     );
@@ -487,92 +407,122 @@ function App() {
 
   function BonusPage() {
     return (
-      <div className="page">
+      <section className="page">
         <div className="icon">🎁</div>
 
         <h2>Ежедневный бонус</h2>
 
-        <div className="bonus">
-          +100 🪙
-          <small>Каждый день</small>
-        </div>
+        {bonusAvailable ? (
+          <>
+            <p>Заходи каждый день и получай бесплатные монеты.</p>
 
-        <p>
-          Заходи каждый день и получай бесплатные
-          монеты для игры.
-        </p>
+            <div className="bonus">
+              +100 🪙
+              <small>Сегодня доступно</small>
+            </div>
 
-        <button
-          disabled={bonusTaken}
-          onClick={takeBonus}
-        >
-          {bonusTaken
-            ? "Бонус уже получен"
-            : "Получить +100 🪙"}
-        </button>
-      </div>
+            <button className="gold" onClick={takeBonus}>
+              🎁 ЗАБРАТЬ БОНУС
+            </button>
+          </>
+        ) : (
+          <>
+            <p>Сегодня бонус уже получен.</p>
+
+            <div className="bonus">
+              ✅
+              <small>Приходи завтра</small>
+            </div>
+          </>
+        )}
+      </section>
     );
   }
 
   function RatingPage() {
-    const players = [
-      ["🦫 Бобёр", 12450],
-      ["🐹 Рыжик", 9850],
-      ["🐻 Медведь", 7420],
-      [user.name, balance],
+    const ranking = [
+      ["🦫 Бобёр Макс", 12850],
+      ["🦫 Бобёр Алекс", 9340],
+      ["🦫 Бобёр Иван", 7210],
+      [telegramName, balance],
+      ["🦫 Бобёр Дима", 4850],
     ].sort((a, b) => b[1] - a[1]);
 
     return (
-      <div className="page">
+      <section className="page">
         <div className="icon">🏆</div>
-
         <h2>Рейтинг</h2>
 
-        {players.map(([name, coins], index) => (
-          <div
-            className="rank"
-            key={`${name}-${index}`}
-          >
+        {ranking.map(([name, coins], index) => (
+          <div className="rank" key={`${name}-${index}`}>
             <span>
               {index + 1}. {name}
             </span>
 
-            <b>{coins} 🪙</b>
+            <b>🪙 {coins}</b>
           </div>
         ))}
-      </div>
+      </section>
     );
   }
 
   function ProfilePage() {
     return (
-      <div className="page">
-        {user.photo ? (
-          <img
-            className="avatar"
-            src={user.photo}
-            alt=""
-          />
+      <section className="page">
+        {avatar ? (
+          <img className="avatar" src={avatar} alt="avatar" />
         ) : (
-          <div className="avatar">🦫</div>
+          <div className="avatar" style={{ display: "inline-grid", placeItems: "center", fontSize: 35 }}>
+            🦫
+          </div>
         )}
 
-        <h2>{user.name}</h2>
+        <h2>{telegramName}</h2>
 
-        <p>{user.username}</p>
+        {user.username && <p>{user.username}</p>}
 
         <div className="profile">
-          <div>
-            Баланс
-            <b>{balance} 🪙</b>
-          </div>
-
           <div>
             Telegram ID
             <b>{user.id}</b>
           </div>
+
+          <div>
+            Баланс
+            <b>🪙 {balance}</b>
+          </div>
+
+          <div>
+            Игр
+            <b>{history.length}</b>
+          </div>
+
+          <div>
+            Побед
+            <b>{history.filter((item) => item.result === "Забрано").length}</b>
+          </div>
         </div>
-      </div>
+
+        <h3>📜 История игр</h3>
+
+        {history.length === 0 && <p>История пока пустая.</p>}
+
+        {history.slice(0, 10).map((item) => (
+          <div className="rank" key={`${item.id}-${item.date}`}>
+            <span>
+              #{item.id} · {item.result}
+              <br />
+              <small>{item.date}</small>
+            </span>
+
+            <b>
+              {item.result === "Забрано"
+                ? `+${item.win} 🪙`
+                : `-${item.bet} 🪙`}
+            </b>
+          </div>
+        ))}
+      </section>
     );
   }
 
@@ -583,20 +533,15 @@ function App() {
           <div className="bob">🦫</div>
 
           <div>
-            <small>TELEGRAM MINI APP</small>
-
+            <small>SAPER BOBER</small>
             <h1>Сапёр Бобёр</h1>
-
-            <p>Не попади на мину</p>
+            <p>Версия 0.3.1</p>
           </div>
         </div>
 
         <div className="mini">
-          {user.photo ? (
-            <img
-              src={user.photo}
-              alt=""
-            />
+          {avatar ? (
+            <img src={avatar} alt="" />
           ) : (
             "🦫"
           )}
@@ -604,18 +549,13 @@ function App() {
       </header>
 
       {page === "game" && <GamePage />}
-
       {page === "bonus" && <BonusPage />}
-
       {page === "rating" && <RatingPage />}
-
       {page === "profile" && <ProfilePage />}
 
       <nav>
         <button
-          className={
-            page === "game" ? "active" : ""
-          }
+          className={page === "game" ? "active" : ""}
           onClick={() => setPage("game")}
         >
           <span>🎮</span>
@@ -623,9 +563,7 @@ function App() {
         </button>
 
         <button
-          className={
-            page === "bonus" ? "active" : ""
-          }
+          className={page === "bonus" ? "active" : ""}
           onClick={() => setPage("bonus")}
         >
           <span>🎁</span>
@@ -633,9 +571,7 @@ function App() {
         </button>
 
         <button
-          className={
-            page === "rating" ? "active" : ""
-          }
+          className={page === "rating" ? "active" : ""}
           onClick={() => setPage("rating")}
         >
           <span>🏆</span>
@@ -643,9 +579,7 @@ function App() {
         </button>
 
         <button
-          className={
-            page === "profile" ? "active" : ""
-          }
+          className={page === "profile" ? "active" : ""}
           onClick={() => setPage("profile")}
         >
           <span>👤</span>
@@ -656,6 +590,4 @@ function App() {
   );
 }
 
-createRoot(
-  document.getElementById("root")
-).render(<App />);
+createRoot(document.getElementById("root")).render(<App />);
