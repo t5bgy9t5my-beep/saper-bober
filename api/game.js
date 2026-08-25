@@ -1,10 +1,24 @@
 ```javascript
 const games = new Map();
+const balances = new Map();
 
 const BOARD_SIZE = 25;
 const MINES = 5;
+const START_BALANCE = 1000;
 
-function createGame(bet) {
+function getBalance(userId) {
+  if (!balances.has(userId)) {
+    balances.set(userId, START_BALANCE);
+  }
+
+  return balances.get(userId);
+}
+
+function setBalance(userId, value) {
+  balances.set(userId, Number(value.toFixed(2)));
+}
+
+function createGame(bet, userId) {
   const mines = new Set();
 
   while (mines.size < MINES) {
@@ -12,12 +26,13 @@ function createGame(bet) {
   }
 
   return {
+    userId,
     bet: Number(bet),
     mines: [...mines],
     opened: [],
     multiplier: 1,
-    status: "playing",
     win: 0,
+    status: "playing",
   };
 }
 
@@ -42,10 +57,11 @@ export default function handler(req, res) {
       gameId,
       cell,
       bet,
+      userId = "demo-user",
     } = req.body || {};
 
     // =========================
-    // START GAME
+    // START
     // =========================
 
     if (action === "start") {
@@ -61,9 +77,33 @@ export default function handler(req, res) {
         });
       }
 
+      if (gameBet > 100000) {
+        return res.status(400).json({
+          ok: false,
+          error: "Bet is too large",
+        });
+      }
+
+      const balance = getBalance(String(userId));
+
+      if (balance < gameBet) {
+        return res.status(400).json({
+          ok: false,
+          error: "Insufficient balance",
+          balance,
+        });
+      }
+
+      // Списываем ставку СЕРВЕРНО.
+      const newBalance = balance - gameBet;
+      setBalance(String(userId), newBalance);
+
       const id = createGameId();
 
-      const game = createGame(gameBet);
+      const game = createGame(
+        gameBet,
+        String(userId)
+      );
 
       games.set(id, game);
 
@@ -75,12 +115,13 @@ export default function handler(req, res) {
         bet: game.bet,
         multiplier: 1,
         win: 0,
+        balance: newBalance,
         status: "playing",
       });
     }
 
     // =========================
-    // OPEN CELL
+    // OPEN
     // =========================
 
     if (action === "open") {
@@ -92,6 +133,13 @@ export default function handler(req, res) {
       }
 
       const game = games.get(gameId);
+
+      if (String(game.userId) !== String(userId)) {
+        return res.status(403).json({
+          ok: false,
+          error: "Game belongs to another user",
+        });
+      }
 
       if (game.status !== "playing") {
         return res.status(400).json({
@@ -138,12 +186,13 @@ export default function handler(req, res) {
           win: 0,
           bet: game.bet,
           opened: game.opened,
+          balance: getBalance(String(userId)),
           status: "lost",
         });
       }
 
       // =========================
-      // SAFE CELL
+      // SAFE
       // =========================
 
       game.multiplier = Number(
@@ -162,6 +211,7 @@ export default function handler(req, res) {
         win: game.win,
         bet: game.bet,
         opened: game.opened,
+        balance: getBalance(String(userId)),
         status: "playing",
       });
     }
@@ -180,6 +230,13 @@ export default function handler(req, res) {
 
       const game = games.get(gameId);
 
+      if (String(game.userId) !== String(userId)) {
+        return res.status(403).json({
+          ok: false,
+          error: "Game belongs to another user",
+        });
+      }
+
       if (game.status !== "playing") {
         return res.status(400).json({
           ok: false,
@@ -187,9 +244,22 @@ export default function handler(req, res) {
         });
       }
 
+      if (game.win <= 0) {
+        return res.status(400).json({
+          ok: false,
+          error: "Nothing to cash out",
+        });
+      }
+
       // ВАЖНО:
-      // ставка берётся только из серверной игры.
-      // bet из запроса клиента здесь НЕ используется.
+      // сумма берётся только из серверного состояния игры.
+      const win = game.win;
+
+      const balance = getBalance(String(userId));
+
+      const newBalance = balance + win;
+
+      setBalance(String(userId), newBalance);
 
       game.status = "cashed_out";
 
@@ -198,8 +268,22 @@ export default function handler(req, res) {
         result: "cashout",
         bet: game.bet,
         multiplier: game.multiplier,
-        win: game.win,
+        win,
+        balance: newBalance,
         status: "cashed_out",
+      });
+    }
+
+    // =========================
+    // BALANCE
+    // =========================
+
+    if (action === "balance") {
+      const balance = getBalance(String(userId));
+
+      return res.status(200).json({
+        ok: true,
+        balance,
       });
     }
 
