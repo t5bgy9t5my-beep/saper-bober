@@ -58,13 +58,6 @@ function getTelegramUser() {
   };
 }
 
-function getLocalBonusStatus() {
-  return (
-    localStorage.getItem("bober_bonus_day") !==
-    getTodayKey()
-  );
-}
-
 function getTodayKey() {
   const d = new Date();
 
@@ -81,6 +74,27 @@ function loadHistory() {
   } catch {
     return [];
   }
+}
+
+function getSavedGameId() {
+  return localStorage.getItem(
+    "bober_active_game"
+  );
+}
+
+function saveGameId(gameId) {
+  if (gameId) {
+    localStorage.setItem(
+      "bober_active_game",
+      gameId
+    );
+  }
+}
+
+function clearSavedGame() {
+  localStorage.removeItem(
+    "bober_active_game"
+  );
 }
 
 async function api(action, data = {}) {
@@ -100,7 +114,9 @@ async function api(action, data = {}) {
   try {
     result = await response.json();
   } catch {
-    throw new Error("Сервер вернул некорректный ответ");
+    throw new Error(
+      "Сервер вернул некорректный ответ"
+    );
   }
 
   if (!response.ok || result.ok === false) {
@@ -115,7 +131,9 @@ async function api(action, data = {}) {
 function App() {
   const [user] = useState(getTelegramUser);
 
-  const [balance, setBalance] = useState(START_BALANCE);
+  const [balance, setBalance] = useState(
+    START_BALANCE
+  );
 
   const [history, setHistory] = useState(
     loadHistory
@@ -130,7 +148,11 @@ function App() {
   const [error, setError] = useState("");
 
   const [bonusAvailable, setBonusAvailable] =
-    useState(getLocalBonusStatus);
+    useState(
+      localStorage.getItem(
+        "bober_bonus_day"
+      ) !== getTodayKey()
+    );
 
   const [game, setGame] = useState({
     active: false,
@@ -149,8 +171,11 @@ function App() {
 
   const bets = [10, 25, 50, 100, 250, 500];
 
+  /*
+   * Загружаем состояние при запуске приложения.
+   */
   useEffect(() => {
-    loadServerBalance();
+    restoreGame();
   }, []);
 
   useEffect(() => {
@@ -160,32 +185,122 @@ function App() {
     );
   }, [history]);
 
-  async function loadServerBalance() {
+  async function restoreGame() {
     try {
       setLoading(true);
       setError("");
 
-      const result = await api("balance", {
+      const savedGameId =
+        getSavedGameId();
+
+      /*
+       * Если активной игры нет —
+       * просто загружаем баланс.
+       */
+      if (!savedGameId) {
+        await loadBalance();
+        return;
+      }
+
+      /*
+       * Проверяем игру на сервере.
+       */
+      const result = await api("state", {
+        gameId: savedGameId,
         userId: user.id,
       });
 
-      setBalance(Number(result.balance) || 0);
+      /*
+       * Игра больше не существует.
+       */
+      if (!result.exists) {
+        clearSavedGame();
+        await loadBalance();
+        return;
+      }
+
+      /*
+       * Игра уже завершена.
+       */
+      if (
+        result.status === "lost" ||
+        result.status === "cashed_out"
+      ) {
+        clearSavedGame();
+        await loadBalance();
+        return;
+      }
+
+      /*
+       * Восстанавливаем активную игру.
+       */
+      setGame({
+        active: true,
+        finished: false,
+        lost: false,
+        gameId: result.gameId,
+        opened: result.opened || [],
+        mines: [],
+        multiplier:
+          Number(result.multiplier) || 1,
+        winAmount:
+          Number(result.win) || 0,
+        claimed: false,
+        bet:
+          Number(result.bet) || 10,
+      });
+
+      /*
+       * Определяем режим по количеству мин.
+       */
+      if (Number(result.mines) === 3) {
+        setMode("easy");
+      } else if (Number(result.mines) === 8) {
+        setMode("hard");
+      } else {
+        setMode("medium");
+      }
+
+      await loadBalance();
     } catch (err) {
       console.error(err);
+
+      /*
+       * Если сервер временно недоступен,
+       * НЕ удаляем gameId.
+       *
+       * Это важно: игра может восстановиться
+       * при следующей попытке.
+       */
       setError(
-        "Не удалось получить баланс с сервера"
+        "Не удалось восстановить игру"
       );
     } finally {
       setLoading(false);
     }
   }
 
-  function updateBalanceFromServer(result) {
-    if (
-      result &&
-      typeof result.balance === "number"
-    ) {
-      setBalance(result.balance);
+  async function loadBalance() {
+    /*
+     * Сейчас balance.js у нас отдельный API.
+     * Поэтому получаем баланс через него.
+     */
+    try {
+      const response = await fetch(
+        "/api/balance"
+      );
+
+      const result =
+        await response.json();
+
+      if (
+        result &&
+        typeof result.balance === "number"
+      ) {
+        setBalance(result.balance);
+      }
+    } catch (err) {
+      console.error(err);
     }
   }
 
@@ -212,7 +327,10 @@ function App() {
         bet: game.bet,
       });
 
-      updateBalanceFromServer(result);
+      /*
+       * Сохраняем ID сразу после создания игры.
+       */
+      saveGameId(result.gameId);
 
       setGame({
         active: true,
@@ -224,11 +342,26 @@ function App() {
         multiplier: 1,
         winAmount: 0,
         claimed: false,
-        bet: result.bet,
+        bet:
+          Number(result.bet) ||
+          game.bet,
       });
+
+      /*
+       * Пока баланс временный —
+       * уменьшаем его локально.
+       */
+      setBalance(
+        (value) =>
+          value - game.bet
+      );
     } catch (err) {
       console.error(err);
-      setError(err.message || "Не удалось начать игру");
+
+      setError(
+        err.message ||
+          "Не удалось начать игру"
+      );
     } finally {
       setLoading(false);
     }
@@ -237,7 +370,8 @@ function App() {
   async function openCell(index) {
     if (!game.active) return;
 
-    if (game.opened.includes(index)) return;
+    if (game.opened.includes(index))
+      return;
 
     if (!game.gameId) return;
 
@@ -251,21 +385,20 @@ function App() {
         cell: index,
       });
 
-      updateBalanceFromServer(result);
-
       if (result.result === "mine") {
         setGame((g) => ({
           ...g,
           active: false,
           finished: true,
           lost: true,
-          opened: result.opened || [
-            ...g.opened,
-            index,
-          ],
+          opened:
+            result.opened ||
+            [...g.opened, index],
           multiplier: 0,
           winAmount: 0,
         }));
+
+        clearSavedGame();
 
         addHistory({
           id: Date.now(),
@@ -273,7 +406,8 @@ function App() {
           bet: game.bet,
           win: 0,
           result: "lose",
-          date: new Date().toLocaleTimeString(),
+          date:
+            new Date().toLocaleTimeString(),
         });
 
         return;
@@ -283,22 +417,21 @@ function App() {
         setGame((g) => ({
           ...g,
           opened:
-            result.opened || [
-              ...g.opened,
-              index,
-            ],
-          multiplier: Number(
-            result.multiplier || 1
-          ),
-          winAmount: Number(
-            result.win || 0
-          ),
+            result.opened ||
+            [...g.opened, index],
+          multiplier:
+            Number(result.multiplier) ||
+            1,
+          winAmount:
+            Number(result.win) || 0,
         }));
       }
     } catch (err) {
       console.error(err);
+
       setError(
-        err.message || "Ошибка при открытии клетки"
+        err.message ||
+          "Ошибка при открытии клетки"
       );
     } finally {
       setLoading(false);
@@ -316,14 +449,26 @@ function App() {
       setError("");
       setLoading(true);
 
-      const result = await api("cashout", {
-        userId: user.id,
-        gameId: game.gameId,
-      });
+      const result = await api(
+        "cashout",
+        {
+          userId: user.id,
+          gameId: game.gameId,
+        }
+      );
 
-      updateBalanceFromServer(result);
+      const amount =
+        Number(result.win) || 0;
 
-      const amount = Number(result.win || 0);
+      /*
+       * Сейчас добавляем выигрыш локально.
+       * Позже перенесём это полностью
+       * на серверную базу.
+       */
+      setBalance(
+        (value) =>
+          value + amount
+      );
 
       addHistory({
         id: Date.now(),
@@ -331,8 +476,11 @@ function App() {
         bet: game.bet,
         win: amount,
         result: "win",
-        date: new Date().toLocaleTimeString(),
+        date:
+          new Date().toLocaleTimeString(),
       });
+
+      clearSavedGame();
 
       setGame((g) => ({
         ...g,
@@ -340,14 +488,17 @@ function App() {
         finished: true,
         claimed: true,
         winAmount: amount,
-        multiplier: Number(
-          result.multiplier || g.multiplier
-        ),
+        multiplier:
+          Number(
+            result.multiplier
+          ) || g.multiplier,
       }));
     } catch (err) {
       console.error(err);
+
       setError(
-        err.message || "Не удалось забрать выигрыш"
+        err.message ||
+          "Не удалось забрать выигрыш"
       );
     } finally {
       setLoading(false);
@@ -355,6 +506,8 @@ function App() {
   }
 
   function newGame() {
+    clearSavedGame();
+
     setError("");
 
     setGame({
@@ -389,14 +542,10 @@ function App() {
   function takeBonus() {
     if (!bonusAvailable) return;
 
-    /*
-      Пока бонус остаётся локальным.
-      После подключения базы перенесём его
-      на сервер, чтобы нельзя было получить
-      бонус повторно через другой браузер.
-    */
-
-    setBalance((v) => v + DAILY_BONUS);
+    setBalance(
+      (value) =>
+        value + DAILY_BONUS
+    );
 
     localStorage.setItem(
       "bober_bonus_day",
@@ -413,14 +562,18 @@ function App() {
           <div className="user">
             <div>
               <span>Игрок</span>
-              <strong>{user.name}</strong>
+              <strong>
+                {user.name}
+              </strong>
             </div>
 
             <div>
               <span>Баланс</span>
-
               <strong>
-                {balance.toLocaleString("ru-RU")} ₽
+                {balance.toLocaleString(
+                  "ru-RU"
+                )}{" "}
+                ₽
               </strong>
             </div>
           </div>
@@ -434,47 +587,55 @@ function App() {
               marginBottom: 10,
             }}
           >
-            {Object.values(MODES).map(
-              (item) => (
-                <button
-                  key={item.id}
-                  onClick={() =>
-                    selectMode(item.id)
-                  }
-                  disabled={
-                    game.active || loading
-                  }
-                  style={{
-                    border: "0",
-                    borderRadius: 10,
-                    padding: "8px 4px",
-                    background:
-                      mode === item.id
-                        ? "#a8d85b"
-                        : "#11180f",
-                    color:
-                      mode === item.id
-                        ? "#15200e"
-                        : "#9aa793",
-                    fontWeight: 800,
-                    fontSize: 10,
-                  }}
-                >
-                  {item.icon} {item.name}
-                  <br />
-                  <small>
-                    {item.mines} мин
-                  </small>
-                </button>
-              )
-            )}
+            {Object.values(
+              MODES
+            ).map((item) => (
+              <button
+                key={item.id}
+                onClick={() =>
+                  selectMode(
+                    item.id
+                  )
+                }
+                disabled={
+                  game.active ||
+                  loading
+                }
+                style={{
+                  border: "0",
+                  borderRadius: 10,
+                  padding:
+                    "8px 4px",
+                  background:
+                    mode ===
+                    item.id
+                      ? "#a8d85b"
+                      : "#11180f",
+                  color:
+                    mode ===
+                    item.id
+                      ? "#15200e"
+                      : "#9aa793",
+                  fontWeight: 800,
+                  fontSize: 10,
+                }}
+              >
+                {item.icon}{" "}
+                {item.name}
+                <br />
+                <small>
+                  {item.mines} мин
+                </small>
+              </button>
+            ))}
           </div>
 
           <div className="row">
             <div>
               <span
                 style={{
-                  color: "#74806e",
+                  color:
+                    "#74806e",
                 }}
               >
                 Ставка
@@ -486,24 +647,30 @@ function App() {
             </div>
 
             <div className="bets">
-              {bets.map((bet) => (
-                <button
-                  key={bet}
-                  className={
-                    game.bet === bet
-                      ? "sel"
-                      : ""
-                  }
-                  onClick={() =>
-                    setBet(bet)
-                  }
-                  disabled={
-                    game.active || loading
-                  }
-                >
-                  {bet}
-                </button>
-              ))}
+              {bets.map(
+                (bet) => (
+                  <button
+                    key={bet}
+                    className={
+                      game.bet ===
+                      bet
+                        ? "sel"
+                        : ""
+                    }
+                    onClick={() =>
+                      setBet(
+                        bet
+                      )
+                    }
+                    disabled={
+                      game.active ||
+                      loading
+                    }
+                  >
+                    {bet}
+                  </button>
+                )
+              )}
             </div>
           </div>
         </div>
@@ -514,10 +681,13 @@ function App() {
               marginTop: 10,
               padding: 10,
               borderRadius: 12,
-              background: "#51251e",
-              color: "#ffb5a8",
+              background:
+                "#51251e",
+              color:
+                "#ffb5a8",
               fontSize: 11,
-              textAlign: "center",
+              textAlign:
+                "center",
             }}
           >
             ⚠️ {error}
@@ -529,44 +699,56 @@ function App() {
             <>
               💥 БУМ!
               <span>
-                Ты попал на мину. Ставка
+                Ты попал на
+                мину. Ставка
                 потеряна.
               </span>
             </>
           ) : game.claimed ? (
             <>
-              💰 ВЫИГРЫШ ЗАБРАН
+              💰 ВЫИГРЫШ
+              ЗАБРАН
               <span>
                 +
                 {game.winAmount.toLocaleString(
                   "ru-RU"
-                )} ₽
+                )}{" "}
+                ₽
               </span>
             </>
           ) : game.finished ? (
             <>
-              🎮 ИГРА ЗАКОНЧЕНА
+              🎮 ИГРА
+              ЗАКОНЧЕНА
               <span>
-                Нажми «Новая игра»
+                Нажми
+                «Новая игра»
               </span>
             </>
           ) : game.active ? (
             <>
-              💰 МОЖНО ЗАБРАТЬ:{" "}
+              💰 МОЖНО
+              ЗАБРАТЬ:{" "}
               {game.winAmount.toLocaleString(
                 "ru-RU"
-              )} ₽
+              )}{" "}
+              ₽
               <span>
                 Коэффициент ×
-                {game.multiplier.toFixed(2)}
+                {game.multiplier.toFixed(
+                  2
+                )}
               </span>
             </>
           ) : (
             <>
-              🦫 САПЁР БОБЁР
+              🦫 САПЁР
+              БОБЁР
               <span>
-                Выбери клетку и попробуй
-                увеличить выигрыш
+                Выбери клетку
+                и попробуй
+                увеличить
+                выигрыш
               </span>
             </>
           )}
@@ -574,54 +756,74 @@ function App() {
 
         <div className="grid">
           {Array.from({
-            length: GRID_SIZE,
-          }).map((_, index) => {
-            const opened =
-              game.opened.includes(index);
+            length:
+              GRID_SIZE,
+          }).map(
+            (_, index) => {
+              const opened =
+                game.opened.includes(
+                  index
+                );
 
-            const mine =
-              game.mines.includes(index);
+              const mine =
+                game.mines.includes(
+                  index
+                );
 
-            return (
-              <button
-                key={index}
-                className={`cell ${
-                  opened ? "open" : ""
-                } ${
-                  mine && game.lost
-                    ? "mine"
-                    : ""
-                }`}
-                onClick={() =>
-                  openCell(index)
-                }
-                disabled={
-                  !game.active ||
-                  opened ||
-                  loading
-                }
-              >
-                {mine && game.lost
-                  ? "💣"
-                  : opened
-                  ? "💎"
-                  : "?"}
-              </button>
-            );
-          })}
+              return (
+                <button
+                  key={index}
+                  className={`cell ${
+                    opened
+                      ? "open"
+                      : ""
+                  } ${
+                    mine &&
+                    game.lost
+                      ? "mine"
+                      : ""
+                  }`}
+                  onClick={() =>
+                    openCell(
+                      index
+                    )
+                  }
+                  disabled={
+                    !game.active ||
+                    opened ||
+                    loading
+                  }
+                >
+                  {mine &&
+                  game.lost
+                    ? "💣"
+                    : opened
+                    ? "💎"
+                    : "?"}
+                </button>
+              );
+            }
+          )}
         </div>
 
         <div className="stats">
           <div>
             Открыто
             <b>
-              {game.opened.length}
+              {
+                game.opened
+                  .length
+              }
             </b>
           </div>
 
           <div>
             Мин
-            <b>{currentMode.mines}</b>
+            <b>
+              {
+                currentMode.mines
+              }
+            </b>
           </div>
 
           <div>
@@ -640,13 +842,17 @@ function App() {
         {!game.active &&
           !game.finished && (
             <button
-              onClick={startGame}
+              onClick={
+                startGame
+              }
               disabled={
                 loading ||
-                balance < game.bet
+                balance <
+                  game.bet
               }
             >
-              {balance < game.bet
+              {balance <
+              game.bet
                 ? "Недостаточно средств"
                 : loading
                 ? "⏳ Подождите..."
@@ -655,11 +861,16 @@ function App() {
           )}
 
         {game.active &&
-          game.winAmount > 0 && (
+          game.winAmount >
+            0 && (
             <button
               className="gold"
-              onClick={claimWin}
-              disabled={loading}
+              onClick={
+                claimWin
+              }
+              disabled={
+                loading
+              }
             >
               {loading
                 ? "⏳ Обработка..."
@@ -671,8 +882,12 @@ function App() {
 
         {game.finished && (
           <button
-            onClick={newGame}
-            disabled={loading}
+            onClick={
+              newGame
+            }
+            disabled={
+              loading
+            }
           >
             🔄 Новая игра
           </button>
@@ -684,18 +899,24 @@ function App() {
   function BonusPage() {
     return (
       <div className="page">
-        <div className="icon">🎁</div>
+        <div className="icon">
+          🎁
+        </div>
 
-        <h2>Ежедневный бонус</h2>
+        <h2>
+          Ежедневный бонус
+        </h2>
 
         <p>
-          Заходи каждый день и получай
-          бесплатные виртуальные монеты.
+          Заходи каждый день
+          и получай
+          бесплатные
+          виртуальные
+          монеты.
         </p>
 
         <div className="bonus">
           +{DAILY_BONUS} ₽
-
           <small>
             {bonusAvailable
               ? "Бонус доступен сегодня"
@@ -704,8 +925,12 @@ function App() {
         </div>
 
         <button
-          onClick={takeBonus}
-          disabled={!bonusAvailable}
+          onClick={
+            takeBonus
+          }
+          disabled={
+            !bonusAvailable
+          }
         >
           {bonusAvailable
             ? "🎁 Забрать бонус"
@@ -719,23 +944,31 @@ function App() {
     const totalWins =
       history.reduce(
         (sum, item) =>
-          sum + (item.win || 0),
+          sum +
+          (item.win || 0),
         0
       );
 
     return (
       <div className="page">
-        <div className="icon">🏆</div>
+        <div className="icon">
+          🏆
+        </div>
 
-        <h2>Рейтинг</h2>
+        <h2>
+          Рейтинг
+        </h2>
 
         <p>
-          Твоя статистика пока хранится
-          на этом устройстве.
+          Твоя статистика
+          пока хранится на
+          этом устройстве.
         </p>
 
         <div className="rank">
-          <span>🥇 {user.name}</span>
+          <span>
+            🥇 {user.name}
+          </span>
 
           <b>
             {totalWins.toLocaleString(
@@ -746,12 +979,19 @@ function App() {
         </div>
 
         <div className="rank">
-          <span>🎮 Игр сыграно</span>
-          <b>{history.length}</b>
+          <span>
+            🎮 Игр сыграно
+          </span>
+
+          <b>
+            {history.length}
+          </b>
         </div>
 
         <div className="rank">
-          <span>💰 Баланс</span>
+          <span>
+            💰 Баланс
+          </span>
 
           <b>
             {balance.toLocaleString(
@@ -770,23 +1010,31 @@ function App() {
         {user.photo ? (
           <img
             className="avatar"
-            src={user.photo}
+            src={
+              user.photo
+            }
             alt=""
           />
         ) : (
           <div className="avatar" />
         )}
 
-        <h2>{user.name}</h2>
+        <h2>
+          {user.name}
+        </h2>
 
         {user.username && (
-          <p>@{user.username}</p>
+          <p>
+            @{user.username}
+          </p>
         )}
 
         <div className="profile">
           <div>
             Telegram ID
-            <b>{user.id}</b>
+            <b>
+              {user.id}
+            </b>
           </div>
 
           <div>
@@ -801,7 +1049,9 @@ function App() {
 
           <div>
             Игр
-            <b>{history.length}</b>
+            <b>
+              {history.length}
+            </b>
           </div>
 
           <div>
@@ -810,14 +1060,16 @@ function App() {
               {
                 history.filter(
                   (x) =>
-                    x.result === "win"
+                    x.result ===
+                    "win"
                 ).length
               }
             </b>
           </div>
         </div>
 
-        {history.length > 0 && (
+        {history.length >
+          0 && (
           <>
             <h3>
               Последние игры
@@ -825,31 +1077,37 @@ function App() {
 
             {history
               .slice(0, 5)
-              .map((item) => (
-                <div
-                  key={item.id}
-                  className="rank"
-                  style={{
-                    marginBottom: 5,
-                  }}
-                >
-                  <span>
-                    {item.result ===
-                    "win"
-                      ? "💰 Победа"
-                      : "💥 Мина"}
-                    {" · "}
-                    {item.mode}
-                  </span>
+              .map(
+                (item) => (
+                  <div
+                    key={
+                      item.id
+                    }
+                    className="rank"
+                    style={{
+                      marginBottom: 5,
+                    }}
+                  >
+                    <span>
+                      {item.result ===
+                      "win"
+                        ? "💰 Победа"
+                        : "💥 Мина"}
+                      {" · "}
+                      {
+                        item.mode
+                      }
+                    </span>
 
-                  <b>
-                    {item.result ===
-                    "win"
-                      ? `+${item.win} ₽`
-                      : `-${item.bet} ₽`}
-                  </b>
-                </div>
-              ))}
+                    <b>
+                      {item.result ===
+                      "win"
+                        ? `+${item.win} ₽`
+                        : `-${item.bet} ₽`}
+                    </b>
+                  </div>
+                )
+              )}
           </>
         )}
       </div>
@@ -874,7 +1132,8 @@ function App() {
             </h1>
 
             <p>
-              Рискни. Открой. Забери.
+              Рискни. Открой.
+              Забери.
             </p>
           </div>
         </div>
@@ -889,19 +1148,23 @@ function App() {
       </header>
 
       <main>
-        {page === "game" && (
+        {page ===
+          "game" && (
           <GamePage />
         )}
 
-        {page === "bonus" && (
+        {page ===
+          "bonus" && (
           <BonusPage />
         )}
 
-        {page === "rating" && (
+        {page ===
+          "rating" && (
           <RatingPage />
         )}
 
-        {page === "profile" && (
+        {page ===
+          "profile" && (
           <ProfilePage />
         )}
       </main>
@@ -909,58 +1172,78 @@ function App() {
       <nav>
         <button
           className={
-            page === "game"
+            page ===
+            "game"
               ? "active"
               : ""
           }
           onClick={() =>
-            setPage("game")
+            setPage(
+              "game"
+            )
           }
         >
           <span>🎮</span>
-          <small>Игра</small>
+          <small>
+            Игра
+          </small>
         </button>
 
         <button
           className={
-            page === "bonus"
+            page ===
+            "bonus"
               ? "active"
               : ""
           }
           onClick={() =>
-            setPage("bonus")
+            setPage(
+              "bonus"
+            )
           }
         >
           <span>🎁</span>
-          <small>Бонус</small>
+          <small>
+            Бонус
+          </small>
         </button>
 
         <button
           className={
-            page === "rating"
+            page ===
+            "rating"
               ? "active"
               : ""
           }
           onClick={() =>
-            setPage("rating")
+            setPage(
+              "rating"
+            )
           }
         >
           <span>🏆</span>
-          <small>Рейтинг</small>
+          <small>
+            Рейтинг
+          </small>
         </button>
 
         <button
           className={
-            page === "profile"
+            page ===
+            "profile"
               ? "active"
               : ""
           }
           onClick={() =>
-            setPage("profile")
+            setPage(
+              "profile"
+            )
           }
         >
           <span>👤</span>
-          <small>Профиль</small>
+          <small>
+            Профиль
+          </small>
         </button>
       </nav>
     </div>
@@ -968,7 +1251,9 @@ function App() {
 }
 
 createRoot(
-  document.getElementById("root")
+  document.getElementById(
+    "root"
+  )
 ).render(
   <React.StrictMode>
     <App />
