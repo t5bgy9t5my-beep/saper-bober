@@ -1,9 +1,10 @@
+```javascript
 const games = new Map();
 
 const BOARD_SIZE = 25;
 const MINES = 5;
 
-function createGame() {
+function createGame(bet) {
   const mines = new Set();
 
   while (mines.size < MINES) {
@@ -11,11 +12,20 @@ function createGame() {
   }
 
   return {
+    bet: Number(bet),
     mines: [...mines],
     opened: [],
     multiplier: 1,
     status: "playing",
+    win: 0,
   };
+}
+
+function createGameId() {
+  return (
+    Date.now().toString(36) +
+    Math.random().toString(36).slice(2)
+  );
 }
 
 export default function handler(req, res) {
@@ -31,16 +41,29 @@ export default function handler(req, res) {
       action,
       gameId,
       cell,
-      bet = 10,
+      bet,
     } = req.body || {};
 
-    // Создание новой игры
-    if (action === "start") {
-      const id =
-        Date.now().toString(36) +
-        Math.random().toString(36).slice(2);
+    // =========================
+    // START GAME
+    // =========================
 
-      const game = createGame();
+    if (action === "start") {
+      const gameBet = Number(bet);
+
+      if (
+        !Number.isFinite(gameBet) ||
+        gameBet <= 0
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error: "Invalid bet",
+        });
+      }
+
+      const id = createGameId();
+
+      const game = createGame(gameBet);
 
       games.set(id, game);
 
@@ -49,13 +72,17 @@ export default function handler(req, res) {
         gameId: id,
         boardSize: BOARD_SIZE,
         mines: MINES,
+        bet: game.bet,
         multiplier: 1,
         win: 0,
         status: "playing",
       });
     }
 
-    // Открытие клетки
+    // =========================
+    // OPEN CELL
+    // =========================
+
     if (action === "open") {
       if (!gameId || !games.has(gameId)) {
         return res.status(400).json({
@@ -95,9 +122,13 @@ export default function handler(req, res) {
 
       game.opened.push(cellNumber);
 
-      // Мина
+      // =========================
+      // MINE
+      // =========================
+
       if (game.mines.includes(cellNumber)) {
         game.status = "lost";
+        game.win = 0;
 
         return res.status(200).json({
           ok: true,
@@ -105,18 +136,22 @@ export default function handler(req, res) {
           cell: cellNumber,
           multiplier: 0,
           win: 0,
+          bet: game.bet,
           opened: game.opened,
           status: "lost",
         });
       }
 
-      // Безопасная клетка
+      // =========================
+      // SAFE CELL
+      // =========================
+
       game.multiplier = Number(
         (game.multiplier * 1.25).toFixed(2)
       );
 
-      const win = Number(
-        (Number(bet) * game.multiplier).toFixed(2)
+      game.win = Number(
+        (game.bet * game.multiplier).toFixed(2)
       );
 
       return res.status(200).json({
@@ -124,13 +159,17 @@ export default function handler(req, res) {
         result: "safe",
         cell: cellNumber,
         multiplier: game.multiplier,
-        win,
+        win: game.win,
+        bet: game.bet,
         opened: game.opened,
         status: "playing",
       });
     }
 
-    // Забрать выигрыш
+    // =========================
+    // CASHOUT
+    // =========================
+
     if (action === "cashout") {
       if (!gameId || !games.has(gameId)) {
         return res.status(400).json({
@@ -148,27 +187,32 @@ export default function handler(req, res) {
         });
       }
 
-      const win = Number(
-        (Number(bet) * game.multiplier).toFixed(2)
-      );
+      // ВАЖНО:
+      // ставка берётся только из серверной игры.
+      // bet из запроса клиента здесь НЕ используется.
 
       game.status = "cashed_out";
 
       return res.status(200).json({
         ok: true,
         result: "cashout",
+        bet: game.bet,
         multiplier: game.multiplier,
-        win,
+        win: game.win,
         status: "cashed_out",
       });
     }
+
+    // =========================
+    // UNKNOWN ACTION
+    // =========================
 
     return res.status(400).json({
       ok: false,
       error: "Unknown action",
     });
   } catch (error) {
-    console.error(error);
+    console.error("GAME ERROR:", error);
 
     return res.status(500).json({
       ok: false,
@@ -176,3 +220,4 @@ export default function handler(req, res) {
     });
   }
 }
+```
