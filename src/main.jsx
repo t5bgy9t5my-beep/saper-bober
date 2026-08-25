@@ -2,484 +2,575 @@ import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
-const BALANCE_KEY = "saper_bober_balance";
-const HISTORY_KEY = "saper_bober_history";
-const BONUS_KEY = "saper_bober_bonus_date";
+const MODES = {
+  easy: {
+    id: "easy",
+    name: "Легко",
+    icon: "🟢",
+    mines: 3,
+    base: 1.08,
+    step: 0.16,
+  },
+  medium: {
+    id: "medium",
+    name: "Средне",
+    icon: "🟡",
+    mines: 5,
+    base: 1.12,
+    step: 0.22,
+  },
+  hard: {
+    id: "hard",
+    name: "Сложно",
+    icon: "🔴",
+    mines: 8,
+    base: 1.18,
+    step: 0.32,
+  },
+};
 
-const BETS = [10, 25, 50, 100, 250, 500, 1000];
-
-const Telegram =
-  window.Telegram && window.Telegram.WebApp
-    ? window.Telegram.WebApp
-    : null;
-
-if (Telegram) {
-  Telegram.ready();
-  Telegram.expand();
-}
+const START_BALANCE = 1000;
+const DAILY_BONUS = 100;
+const GRID_SIZE = 25;
 
 function getTelegramUser() {
-  const user = Telegram?.initDataUnsafe?.user;
+  const tg = window.Telegram?.WebApp;
 
-  if (user) {
-    return {
-      id: user.id,
-      name:
-        [user.first_name, user.last_name].filter(Boolean).join(" ") ||
-        "Игрок",
-      username: user.username ? `@${user.username}` : "",
-      photo: user.photo_url || "",
-    };
+  if (tg) {
+    tg.ready();
+    tg.expand();
+
+    const user = tg.initDataUnsafe?.user;
+
+    if (user) {
+      return {
+        id: user.id,
+        name:
+          user.first_name ||
+          user.username ||
+          "Игрок",
+        username: user.username || "",
+        photo: user.photo_url || "",
+      };
+    }
   }
 
   return {
-    id: "demo",
+    id: "demo-user",
     name: "Игрок",
-    username: "",
+    username: "demo",
     photo: "",
   };
 }
 
-function loadNumber(key, fallback) {
-  const value = Number(localStorage.getItem(key));
-  return Number.isFinite(value) ? value : fallback;
+function loadBalance() {
+  const value = Number(localStorage.getItem("bober_balance"));
+  return Number.isFinite(value) && value >= 0 ? value : START_BALANCE;
 }
 
 function loadHistory() {
   try {
-    const data = JSON.parse(localStorage.getItem(HISTORY_KEY));
+    const data = JSON.parse(
+      localStorage.getItem("bober_history") || "[]"
+    );
     return Array.isArray(data) ? data : [];
   } catch {
     return [];
   }
 }
 
-function saveHistory(history) {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 30)));
-}
-
-function todayKey() {
-  const now = new Date();
-
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(
-    2,
-    "0"
-  )}-${String(now.getDate()).padStart(2, "0")}`;
-}
-
-function generateMines(count = 5) {
-  const mines = new Set();
-
-  while (mines.size < count) {
-    mines.add(Math.floor(Math.random() * 25));
-  }
-
-  return mines;
+function getTodayKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
 }
 
 function App() {
   const [user] = useState(getTelegramUser);
 
-  const [balance, setBalance] = useState(() =>
-    loadNumber(BALANCE_KEY, 1000)
-  );
+  const [balance, setBalance] = useState(loadBalance);
 
   const [history, setHistory] = useState(loadHistory);
 
+  const [mode, setMode] = useState("medium");
+
+  const [game, setGame] = useState(() => ({
+    active: false,
+    finished: false,
+    lost: false,
+    mines: [],
+    opened: [],
+    multiplier: 1,
+    winAmount: 0,
+    claimed: false,
+    bet: 10,
+  }));
+
   const [page, setPage] = useState("game");
 
-  const [bet, setBet] = useState(100);
+  const [bonusAvailable, setBonusAvailable] = useState(
+    localStorage.getItem("bober_bonus_day") !== getTodayKey()
+  );
 
-  const [gameState, setGameState] = useState("idle");
-  const [mines, setMines] = useState(new Set());
-  const [opened, setOpened] = useState(new Set());
-
-  const [currentWin, setCurrentWin] = useState(0);
-  const [currentMultiplier, setCurrentMultiplier] = useState(1);
-
-  const [gameId, setGameId] = useState(1);
-
-  const [bonusAvailable, setBonusAvailable] = useState(() => {
-    return localStorage.getItem(BONUS_KEY) !== todayKey();
-  });
+  const currentMode = MODES[mode];
 
   useEffect(() => {
-    localStorage.setItem(BALANCE_KEY, String(balance));
+    localStorage.setItem("bober_balance", String(balance));
   }, [balance]);
 
   useEffect(() => {
-    saveHistory(history);
+    localStorage.setItem(
+      "bober_history",
+      JSON.stringify(history)
+    );
   }, [history]);
 
-  const telegramName = user.name;
-  const avatar = user.photo;
+  const bets = [10, 25, 50, 100, 250, 500];
 
-  const openedCount = opened.size;
+  const canStart = balance >= game.bet && !game.active;
 
-  const multiplier = useMemo(() => {
-    if (openedCount <= 0) return 1;
+  const nextMultiplier = useMemo(() => {
+    if (!game.active) return currentMode.base;
 
-    const values = {
-      1: 1.15,
-      2: 1.35,
-      3: 1.6,
-      4: 2.0,
-      5: 2.5,
-      6: 3.2,
-      7: 4.0,
-      8: 5.0,
-      9: 6.5,
-      10: 8.0,
-      11: 10.0,
-      12: 12.5,
-      13: 15.0,
-      14: 18.0,
-      15: 22.0,
-      16: 27.0,
-      17: 33.0,
-      18: 40.0,
-      19: 50.0,
-      20: 65.0,
-    };
+    return (
+      currentMode.base +
+      game.opened.length * currentMode.step
+    );
+  }, [game.active, game.opened.length, currentMode]);
 
-    return values[openedCount] || 1;
-  }, [openedCount]);
+  function createMines(count) {
+    const result = new Set();
 
-  function startGame() {
-    if (gameState !== "idle") return;
-
-    if (bet > balance) {
-      alert("Недостаточно монет для этой ставки.");
-      return;
+    while (result.size < count) {
+      result.add(Math.floor(Math.random() * GRID_SIZE));
     }
 
-    setBalance((value) => value - bet);
-    setMines(generateMines(5));
-    setOpened(new Set());
-    setCurrentWin(0);
-    setCurrentMultiplier(1);
-    setGameState("playing");
+    return [...result];
+  }
+
+  function startGame() {
+    if (balance < game.bet) return;
+
+    const mines = createMines(currentMode.mines);
+
+    setBalance((v) => v - game.bet);
+
+    setGame({
+      active: true,
+      finished: false,
+      lost: false,
+      mines,
+      opened: [],
+      multiplier: 1,
+      winAmount: 0,
+      claimed: false,
+      bet: game.bet,
+    });
   }
 
   function openCell(index) {
-    if (gameState !== "playing") return;
-    if (opened.has(index)) return;
+    if (!game.active) return;
+    if (game.opened.includes(index)) return;
+    if (game.claimed) return;
 
-    if (mines.has(index)) {
-      const lostGame = {
-        id: gameId,
-        date: new Date().toLocaleString("ru-RU"),
-        bet,
-        opened: opened.size,
-        multiplier: Number(multiplier.toFixed(2)),
+    const isMine = game.mines.includes(index);
+
+    if (isMine) {
+      const newHistory = {
+        id: Date.now(),
+        mode: currentMode.name,
+        bet: game.bet,
         win: 0,
-        result: "Проигрыш",
+        result: "lose",
+        date: new Date().toLocaleTimeString(),
       };
 
-      setHistory((items) => [lostGame, ...items]);
-      setGameId((id) => id + 1);
+      setHistory((h) => [newHistory, ...h].slice(0, 20));
 
-      setOpened((old) => {
-        const next = new Set(old);
-        next.add(index);
-        return next;
-      });
+      setGame((g) => ({
+        ...g,
+        active: false,
+        finished: true,
+        lost: true,
+        opened: [...g.opened, index],
+        winAmount: 0,
+      }));
 
-      setCurrentWin(0);
-      setGameState("lost");
       return;
     }
 
-    const nextOpened = new Set(opened);
-    nextOpened.add(index);
+    const opened = [...game.opened, index];
 
-    setOpened(nextOpened);
+    const multiplier =
+      currentMode.base +
+      opened.length * currentMode.step;
 
-    const nextCount = nextOpened.size;
+    const winAmount = Math.floor(game.bet * multiplier);
 
-    const values = {
-      1: 1.15,
-      2: 1.35,
-      3: 1.6,
-      4: 2.0,
-      5: 2.5,
-      6: 3.2,
-      7: 4.0,
-      8: 5.0,
-      9: 6.5,
-      10: 8.0,
-      11: 10.0,
-      12: 12.5,
-      13: 15.0,
-      14: 18.0,
-      15: 22.0,
-      16: 27.0,
-      17: 33.0,
-      18: 40.0,
-      19: 50.0,
-      20: 65.0,
-    };
-
-    const nextMultiplier = values[nextCount] || 1;
-
-    const nextWin = Math.floor(bet * nextMultiplier);
-
-    setCurrentMultiplier(nextMultiplier);
-    setCurrentWin(nextWin);
+    setGame((g) => ({
+      ...g,
+      opened,
+      multiplier,
+      winAmount,
+    }));
   }
 
-  function takeWin() {
-    if (gameState !== "playing") return;
-    if (currentWin <= 0) return;
+  function claimWin() {
+    if (!game.active) return;
+    if (game.winAmount <= 0) return;
+    if (game.claimed) return;
 
-    const win = currentWin;
+    const amount = game.winAmount;
 
-    setBalance((value) => value + win);
+    setBalance((v) => v + amount);
 
-    const completedGame = {
-      id: gameId,
-      date: new Date().toLocaleString("ru-RU"),
-      bet,
-      opened: opened.size,
-      multiplier: Number(currentMultiplier.toFixed(2)),
-      win,
-      result: "Забрано",
+    const newHistory = {
+      id: Date.now(),
+      mode: currentMode.name,
+      bet: game.bet,
+      win: amount,
+      result: "win",
+      date: new Date().toLocaleTimeString(),
     };
 
-    setHistory((items) => [completedGame, ...items]);
-    setGameId((id) => id + 1);
+    setHistory((h) => [newHistory, ...h].slice(0, 20));
 
-    setGameState("won");
+    setGame((g) => ({
+      ...g,
+      active: false,
+      finished: true,
+      claimed: true,
+    }));
   }
 
   function newGame() {
-    setGameState("idle");
-    setMines(new Set());
-    setOpened(new Set());
-    setCurrentWin(0);
-    setCurrentMultiplier(1);
+    setGame({
+      active: false,
+      finished: false,
+      lost: false,
+      mines: [],
+      opened: [],
+      multiplier: 1,
+      winAmount: 0,
+      claimed: false,
+      bet: game.bet,
+    });
   }
 
   function takeBonus() {
     if (!bonusAvailable) return;
 
-    const today = todayKey();
+    setBalance((v) => v + DAILY_BONUS);
 
-    localStorage.setItem(BONUS_KEY, today);
+    localStorage.setItem(
+      "bober_bonus_day",
+      getTodayKey()
+    );
 
-    setBalance((value) => value + 100);
     setBonusAvailable(false);
   }
 
-  function renderCell(index) {
-    const isOpen = opened.has(index);
-    const isMine = mines.has(index);
+  function selectMode(id) {
+    if (game.active) return;
 
-    let content = "";
+    setMode(id);
+  }
 
-    if (isOpen && isMine) {
-      content = "💣";
-    } else if (isOpen) {
-      content = "💎";
-    }
+  function setBet(value) {
+    if (game.active) return;
 
-    return (
-      <button
-        key={index}
-        className={`cell ${isOpen ? "open" : ""} ${
-          isOpen && isMine ? "mine" : ""
-        }`}
-        onClick={() => openCell(index)}
-        disabled={gameState !== "playing" || isOpen}
-      >
-        {content}
-      </button>
-    );
+    setGame((g) => ({
+      ...g,
+      bet: value,
+    }));
   }
 
   function GamePage() {
     return (
-      <main>
-        <section className="card">
+      <div className="page">
+        <div className="card">
           <div className="user">
             <div>
-              Игрок: <strong>{telegramName}</strong>
+              <span>Игрок</span>
+              <strong>{user.name}</strong>
             </div>
 
-            <span>🦫 #{user.id}</span>
+            <div>
+              <span>Баланс</span>
+              <strong>{balance.toLocaleString("ru-RU")} ₽</strong>
+            </div>
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(3, 1fr)",
+              gap: 5,
+              marginBottom: 10,
+            }}
+          >
+            {Object.values(MODES).map((item) => (
+              <button
+                key={item.id}
+                onClick={() => selectMode(item.id)}
+                disabled={game.active}
+                style={{
+                  border: "0",
+                  borderRadius: 10,
+                  padding: "8px 4px",
+                  background:
+                    mode === item.id
+                      ? "#a8d85b"
+                      : "#11180f",
+                  color:
+                    mode === item.id
+                      ? "#15200e"
+                      : "#9aa793",
+                  fontWeight: 800,
+                  fontSize: 10,
+                }}
+              >
+                {item.icon} {item.name}
+                <br />
+                <small>{item.mines} мин</small>
+              </button>
+            ))}
           </div>
 
           <div className="row">
             <div>
-              <span>Баланс</span>
-              <strong>🪙 {balance}</strong>
+              <span style={{ color: "#74806e" }}>
+                Ставка
+              </span>
+              <strong>{game.bet} ₽</strong>
             </div>
 
-            <div>
-              <span>Ставка</span>
-
-              <div className="bets">
-                {BETS.map((value) => (
-                  <button
-                    key={value}
-                    className={bet === value ? "sel" : ""}
-                    disabled={gameState !== "idle"}
-                    onClick={() => setBet(value)}
-                  >
-                    {value}
-                  </button>
-                ))}
-              </div>
+            <div className="bets">
+              {bets.map((bet) => (
+                <button
+                  key={bet}
+                  className={game.bet === bet ? "sel" : ""}
+                  onClick={() => setBet(bet)}
+                  disabled={game.active}
+                >
+                  {bet}
+                </button>
+              ))}
             </div>
           </div>
-        </section>
+        </div>
 
         <div className="status">
-          {gameState === "idle" && (
+          {game.lost ? (
             <>
-              Готов к игре
-              <span>Выбери ставку и начинай</span>
-            </>
-          )}
-
-          {gameState === "playing" && (
-            <>
-              🪙 Можно забрать: {currentWin}
+              💥 БУМ!
               <span>
-                Коэффициент ×{currentMultiplier.toFixed(2)} · открыто{" "}
-                {openedCount}
+                Ты попал на мину. Ставка потеряна.
               </span>
             </>
-          )}
-
-          {gameState === "won" && (
+          ) : game.claimed ? (
             <>
-              ✅ Выигрыш забран: {currentWin} 🪙
-              <span>Игра завершена</span>
+              💰 ВЫИГРЫШ ЗАБРАН
+              <span>
+                +{game.winAmount.toLocaleString("ru-RU")} ₽
+              </span>
             </>
-          )}
-
-          {gameState === "lost" && (
+          ) : game.finished ? (
             <>
-              💣 Бум!
-              <span>Ты открыл мину. Ставка потеряна.</span>
+              🎮 ИГРА ЗАКОНЧЕНА
+              <span>Нажми «Новая игра»</span>
+            </>
+          ) : game.active ? (
+            <>
+              💰 МОЖНО ЗАБРАТЬ:{" "}
+              {game.winAmount.toLocaleString("ru-RU")} ₽
+              <span>
+                Коэффициент ×{game.multiplier.toFixed(2)}
+              </span>
+            </>
+          ) : (
+            <>
+              🦫 САПЁР БОБЁР
+              <span>
+                Выбери клетку и попробуй увеличить выигрыш
+              </span>
             </>
           )}
         </div>
 
         <div className="grid">
-          {Array.from({ length: 25 }, (_, index) => renderCell(index))}
+          {Array.from({ length: GRID_SIZE }).map(
+            (_, index) => {
+              const opened =
+                game.opened.includes(index);
+
+              const mine =
+                game.mines.includes(index);
+
+              return (
+                <button
+                  key={index}
+                  className={`cell ${
+                    opened ? "open" : ""
+                  } ${
+                    mine && game.finished
+                      ? "mine"
+                      : ""
+                  }`}
+                  onClick={() => openCell(index)}
+                  disabled={
+                    !game.active ||
+                    opened ||
+                    game.claimed
+                  }
+                >
+                  {mine && game.finished
+                    ? "💣"
+                    : opened
+                    ? "💎"
+                    : "?"}
+                </button>
+              );
+            }
+          )}
         </div>
 
         <div className="stats">
           <div>
-            Ставка
-            <b>{bet} 🪙</b>
+            Открыто
+            <b>{game.opened.length}</b>
           </div>
 
           <div>
-            Коэффициент
-            <b>×{currentMultiplier.toFixed(2)}</b>
+            Мин
+            <b>{currentMode.mines}</b>
           </div>
 
           <div>
-            Выигрыш
-            <b>{currentWin} 🪙</b>
+            Коэф.
+            <b>
+              ×{game.active
+                ? game.multiplier.toFixed(2)
+                : "—"}
+            </b>
           </div>
         </div>
 
-        {gameState === "idle" && (
-          <button onClick={startGame}>🦫 НАЧАТЬ ИГРУ</button>
-        )}
-
-        {gameState === "playing" && (
-          <button className="gold" onClick={takeWin} disabled={currentWin <= 0}>
-            💰 ЗАБРАТЬ {currentWin} 🪙
+        {!game.active && !game.finished && (
+          <button
+            onClick={startGame}
+            disabled={!canStart}
+          >
+            {balance < game.bet
+              ? "Недостаточно средств"
+              : `🎮 Начать за ${game.bet} ₽`}
           </button>
         )}
 
-        {(gameState === "won" || gameState === "lost") && (
-          <button onClick={newGame}>🔄 НОВАЯ ИГРА</button>
+        {game.active && game.winAmount > 0 && (
+          <button
+            className="gold"
+            onClick={claimWin}
+          >
+            💰 ЗАБРАТЬ{" "}
+            {game.winAmount.toLocaleString("ru-RU")} ₽
+          </button>
         )}
-      </main>
+
+        {game.finished && (
+          <button onClick={newGame}>
+            🔄 Новая игра
+          </button>
+        )}
+      </div>
     );
   }
 
   function BonusPage() {
     return (
-      <section className="page">
+      <div className="page">
         <div className="icon">🎁</div>
 
         <h2>Ежедневный бонус</h2>
 
-        {bonusAvailable ? (
-          <>
-            <p>Заходи каждый день и получай бесплатные монеты.</p>
+        <p>
+          Заходи каждый день и получай бесплатные
+          виртуальные монеты.
+        </p>
 
-            <div className="bonus">
-              +100 🪙
-              <small>Сегодня доступно</small>
-            </div>
+        <div className="bonus">
+          +{DAILY_BONUS} ₽
+          <small>
+            {bonusAvailable
+              ? "Бонус доступен сегодня"
+              : "Бонус уже получен сегодня"}
+          </small>
+        </div>
 
-            <button className="gold" onClick={takeBonus}>
-              🎁 ЗАБРАТЬ БОНУС
-            </button>
-          </>
-        ) : (
-          <>
-            <p>Сегодня бонус уже получен.</p>
-
-            <div className="bonus">
-              ✅
-              <small>Приходи завтра</small>
-            </div>
-          </>
-        )}
-      </section>
+        <button
+          onClick={takeBonus}
+          disabled={!bonusAvailable}
+        >
+          {bonusAvailable
+            ? "🎁 Забрать бонус"
+            : "Бонус получен"}
+        </button>
+      </div>
     );
   }
 
   function RatingPage() {
-    const ranking = [
-      ["🦫 Бобёр Макс", 12850],
-      ["🦫 Бобёр Алекс", 9340],
-      ["🦫 Бобёр Иван", 7210],
-      [telegramName, balance],
-      ["🦫 Бобёр Дима", 4850],
-    ].sort((a, b) => b[1] - a[1]);
+    const totalWins = history.reduce(
+      (sum, item) => sum + (item.win || 0),
+      0
+    );
 
     return (
-      <section className="page">
+      <div className="page">
         <div className="icon">🏆</div>
+
         <h2>Рейтинг</h2>
 
-        {ranking.map(([name, coins], index) => (
-          <div className="rank" key={`${name}-${index}`}>
-            <span>
-              {index + 1}. {name}
-            </span>
+        <p>
+          Твоя статистика пока хранится на этом
+          устройстве.
+        </p>
 
-            <b>🪙 {coins}</b>
-          </div>
-        ))}
-      </section>
+        <div className="rank">
+          <span>🥇 {user.name}</span>
+          <b>{totalWins.toLocaleString("ru-RU")} ₽</b>
+        </div>
+
+        <div className="rank">
+          <span>🎮 Игр сыграно</span>
+          <b>{history.length}</b>
+        </div>
+
+        <div className="rank">
+          <span>💰 Баланс</span>
+          <b>{balance.toLocaleString("ru-RU")} ₽</b>
+        </div>
+      </div>
     );
   }
 
   function ProfilePage() {
     return (
-      <section className="page">
-        {avatar ? (
-          <img className="avatar" src={avatar} alt="avatar" />
+      <div className="page">
+        {user.photo ? (
+          <img
+            className="avatar"
+            src={user.photo}
+            alt=""
+          />
         ) : (
-          <div className="avatar" style={{ display: "inline-grid", placeItems: "center", fontSize: 35 }}>
-            🦫
-          </div>
+          <div className="avatar" />
         )}
 
-        <h2>{telegramName}</h2>
+        <h2>{user.name}</h2>
 
-        {user.username && <p>{user.username}</p>}
+        {user.username && (
+          <p>@{user.username}</p>
+        )}
 
         <div className="profile">
           <div>
@@ -489,7 +580,9 @@ function App() {
 
           <div>
             Баланс
-            <b>🪙 {balance}</b>
+            <b>
+              {balance.toLocaleString("ru-RU")} ₽
+            </b>
           </div>
 
           <div>
@@ -499,30 +592,44 @@ function App() {
 
           <div>
             Побед
-            <b>{history.filter((item) => item.result === "Забрано").length}</b>
+            <b>
+              {
+                history.filter(
+                  (x) => x.result === "win"
+                ).length
+              }
+            </b>
           </div>
         </div>
 
-        <h3>📜 История игр</h3>
+        {history.length > 0 && (
+          <>
+            <h3>Последние игры</h3>
 
-        {history.length === 0 && <p>История пока пустая.</p>}
+            {history.slice(0, 5).map((item) => (
+              <div
+                key={item.id}
+                className="rank"
+                style={{ marginBottom: 5 }}
+              >
+                <span>
+                  {item.result === "win"
+                    ? "💰 Победа"
+                    : "💥 Мина"}
+                  {" · "}
+                  {item.mode}
+                </span>
 
-        {history.slice(0, 10).map((item) => (
-          <div className="rank" key={`${item.id}-${item.date}`}>
-            <span>
-              #{item.id} · {item.result}
-              <br />
-              <small>{item.date}</small>
-            </span>
-
-            <b>
-              {item.result === "Забрано"
-                ? `+${item.win} 🪙`
-                : `-${item.bet} 🪙`}
-            </b>
-          </div>
-        ))}
-      </section>
+                <b>
+                  {item.result === "win"
+                    ? `+${item.win} ₽`
+                    : `-${item.bet} ₽`}
+                </b>
+              </div>
+            ))}
+          </>
+        )}
+      </div>
     );
   }
 
@@ -533,25 +640,23 @@ function App() {
           <div className="bob">🦫</div>
 
           <div>
-            <small>SAPER BOBER</small>
+            <small>TELEGRAM MINI APP</small>
             <h1>Сапёр Бобёр</h1>
-            <p>Версия 0.3.1</p>
+            <p>Рискни. Открой. Забери.</p>
           </div>
         </div>
 
         <div className="mini">
-          {avatar ? (
-            <img src={avatar} alt="" />
-          ) : (
-            "🦫"
-          )}
+          💰 {balance.toLocaleString("ru-RU")} ₽
         </div>
       </header>
 
-      {page === "game" && <GamePage />}
-      {page === "bonus" && <BonusPage />}
-      {page === "rating" && <RatingPage />}
-      {page === "profile" && <ProfilePage />}
+      <main>
+        {page === "game" && <GamePage />}
+        {page === "bonus" && <BonusPage />}
+        {page === "rating" && <RatingPage />}
+        {page === "profile" && <ProfilePage />}
+      </main>
 
       <nav>
         <button
@@ -590,4 +695,6 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+createRoot(document.getElementById("root")).render(
+  <App />
+);
